@@ -1,0 +1,124 @@
+---
+- name: setup node server
+  hosts: nodeserver
+  remote_user: ec2-user
+  become: yes
+
+  tasks:
+  - name: install git
+    yum:
+      name: git
+      state: present
+
+  - name: add nodesource gpg key
+    rpm_key:
+      key: https://rpm.nodesource.com/pub/el/NODESOURCE-GPG-SIGNING-KEY-EL
+      state: present
+
+  - name: add nodesource repo
+    yum_repository:
+      name: node
+      description: NodeSource node 15
+      baseurl: https://rpm.nodesource.com/pub_15.x/el/7/$basearch
+
+  - name: install node
+    yum:
+      name: nodejs
+      state: present
+
+  - name: install pm2
+    community.general.npm:
+      name: pm2
+      global: yes
+
+- name: setup mongo server
+  hosts: mongoserver
+  remote_user: ec2-user
+  become: yes
+
+  tasks:
+  - name: add mongodb gpg key
+    rpm_key:
+      key: https://www.mongodb.org/static/pgp/server-4.4.asc
+      state: present
+
+  - name: add mongodb repo
+    yum_repository:
+      name: mongodb
+      description: MongoDB
+      baseurl: https://repo.mongodb.org/yum/amazon/2/mongodb-org/4.4/$basearch
+
+  - name: install mongodb
+    yum:
+      name: mongodb-org
+      state: present
+
+  - name: configure mongodb
+    replace:
+      path: /etc/mongod.conf
+      regexp: '127\.0\.0\.1'
+      replace: '0.0.0.0'
+
+  - name: start mongodb
+    service:
+      name: mongod
+      state: started
+    register: mongodb_started
+
+- name: install app
+  hosts: nodeserver
+  remote_user: ec2-user
+
+  tasks:
+  - name: clone code
+    git:
+      repo: 'https://github.com/CleverCloud/demo-nodejs-mongodb-rest'
+      dest: /home/ec2-user/app
+      force: yes
+    register: git_finished
+
+  - name: install dependencies
+    shell: npm install
+    register: npm_finished
+    when: git_finished.changed
+    args:
+      chdir: /home/ec2-user/app
+
+  - name: start app
+    shell: pm2 start ./bin/www --name app
+    when: npm_finished.changed
+    args:
+      chdir: /home/ec2-user/app
+    environment:
+      MONGODB_ADDON_URI: mongodb://{{ groups['mongoserver'][0] }}
+    ignore_errors: yes
+
+- name: install webserver
+  hosts: nodeserver
+  remote_user: ec2-user
+  become: yes
+
+  tasks:
+  - name: install epel
+    shell: "amazon-linux-extras install -y epel"
+  - name: install nginx
+    yum:
+      name: nginx
+      state: present
+  - name: copy config
+    copy:
+      src: ./app.conf
+      dest: /etc/nginx/nginx.conf
+      owner: root
+      group: root
+      mode: u=rw,g=r,o=r
+    register: nginx_configured
+  - name: start nginx
+    service:
+      name: nginx
+      state: started
+  - name: reload nginx
+    service:
+      name: nginx
+      state: reloaded
+    when: nginx_configured.changed
